@@ -25,7 +25,7 @@ checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 
 [[package]]
 name = "corvid"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "num-complex",
  "numpy",
@@ -327,7 +327,7 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 [[package]]
 name = "scalpel"
 version = "0.1.0"
-source = "git+https://github.com/FennisRobert/SPARTA?rev=a178949#a178949d00f17bcacdcfff1a0ff5f92467aa817d"
+source = "git+https://github.com/FennisRobert/SPARTA?rev=7d82cdc#7d82cdca257e1136c49e0cf84fe0cfc01c38ec4b"
 dependencies = [
  "rayon",
 ]
@@ -376,10 +376,11 @@ dependencies = [
 
 [[package]]
 name = "sparta-solver"
-version = "0.2.0"
-source = "git+https://github.com/FennisRobert/SPARTA?rev=a178949#a178949d00f17bcacdcfff1a0ff5f92467aa817d"
+version = "0.3.2"
+source = "git+https://github.com/FennisRobert/SPARTA?rev=7d82cdc#7d82cdca257e1136c49e0cf84fe0cfc01c38ec4b"
 dependencies = [
  "ash",
+ "libloading",
  "num-complex",
  "rayon",
  "scalpel",

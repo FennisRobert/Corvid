@@ -329,6 +329,19 @@ fn row_stats<'py>(
     Ok((cnt.into_pyarray_bound(py), sim.into_pyarray_bound(py), sab.into_pyarray_bound(py)))
 }
 
+/// Loads the BLAS and LAPACK at `path` for SPARTA's CPU factorization (the coarse level) and
+/// returns how `blas_library()` names it. Raises when the library lacks a routine.
+#[pyfunction]
+fn _load_blas(path: &str) -> PyResult<String> {
+    sparta::load_blas(path).map_err(pyo3::exceptions::PyRuntimeError::new_err)
+}
+
+/// The BLAS and LAPACK behind SPARTA's CPU factorization, or "portable loops" without one.
+#[pyfunction]
+fn blas_library() -> String {
+    sparta::blas_library()
+}
+
 /// (factor nonzeros, factor seconds, solve milliseconds) of the SPARTA CPU
 /// LDL^T on a complex symmetric matrix (lower triangle used).
 #[pyfunction]
@@ -553,6 +566,8 @@ fn _kernels(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<research::RxSweep>()?;
     m.add_function(wrap_pyfunction!(timers, m)?)?;
     m.add_function(wrap_pyfunction!(row_stats, m)?)?;
+    m.add_function(wrap_pyfunction!(_load_blas, m)?)?;
+    m.add_function(wrap_pyfunction!(blas_library, m)?)?;
     m.add_function(wrap_pyfunction!(bench_direct, m)?)?;
     Ok(())
 }

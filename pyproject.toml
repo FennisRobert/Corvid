@@ -4,13 +4,15 @@ build-backend = "maturin"
 
 [project]
 name = "corvid"
-version = "0.5.0"
+version = "0.5.1"
 description = "CORVID: Coarse Operators by Recursive Volume Interpolation of De Rham complexes"
 readme = "README.md"
 license = { text = "AGPL-3.0-or-later" }
 authors = [{ name = "Robert Fennis" }]
 requires-python = ">=3.9"
-dependencies = ["numpy>=1.21", "scipy>=1.7"]
+dependencies = ["numpy>=1.21", "scipy>=1.7",
+                # BLAS for the coarse factorization off Apple, loaded at import (corvid/_blas.py)
+                "scipy-openblas32; sys_platform != 'darwin'"]
 keywords = ["maxwell", "fem", "nedelec", "preconditioner", "multigrid", "iterative solver", "electromagnetics"]
 classifiers = [
     "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",

@@ -54,8 +54,12 @@ Prebuilt wheels (macOS, Linux and Windows; Python 3.9 or later) are attached to 
 [GitHub release](https://github.com/FennisRobert/Corvid/releases). Nothing is published to PyPI.
 
 ```sh
-pip install corvid --find-links https://github.com/FennisRobert/Corvid/releases/expanded_assets/v0.5.0
+pip install corvid --find-links https://github.com/FennisRobert/Corvid/releases/expanded_assets/v0.5.1
 ```
+
+The coarse factorization uses BLAS: Accelerate on macOS, and elsewhere the `scipy-openblas32` wheel that
+CORVID depends on, loaded at import. `corvid.blas_library()` reports which one is in use, and `CORVID_BLAS`
+can point at another OpenBLAS or MKL library.
 
 To build from source you need a Rust toolchain and network access (SPARTA is fetched from GitHub):
 

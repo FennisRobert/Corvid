@@ -12,8 +12,10 @@ No third-party source code
 CORVID compiles no third-party source. Its sparse direct solves use SPARTA
 (Copyright (C) 2026 Robert Fennis and Milan Rother, AGPL-3.0-or-later), linked
 as a Rust crate. The other Rust crates CORVID links are listed with their
-licences in THIRD-PARTY-NOTICES. NumPy and SciPy are Python dependencies,
-installed separately and not distributed with CORVID.
+licences in THIRD-PARTY-NOTICES. NumPy, SciPy and (off Apple) scipy-openblas32
+are Python dependencies, installed separately and not distributed with CORVID;
+corvid/_blas.py loads that OpenBLAS at run time, following SPARTA's
+sparta/_blas.py.
 
 --------------------------------------------------------------------------------
 Algorithms followed, with no code taken
