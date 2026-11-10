@@ -20,6 +20,7 @@ import scipy.sparse as sp
 from . import _kernels
 
 EDGE_WHITNEY, EDGE_OTHER, FACE = 0, 1, 2
+WALL_LOOKAHEAD = 1.2      # wall rows are selected for this multiple of k0 (see Solver._wall_rows)
 
 
 class Topology:
@@ -144,7 +145,8 @@ class Solver:
     refactor_tol: in a sweep, factorize(K, k0) keeps the block and coarse factors of the last real
              factorization (at k0_f) while |k0^2 / k0_f^2 - 1| < refactor_tol, only switching the
              operator to the new K. A solve on such kept factors that needs clearly more iterations
-             than the last fresh one is stopped, refactored and continued. 0 refactors every time.
+             than the last fresh one is stopped, refactored and continued, and the Solver then keeps
+             factors only up to half that distance. 0 refactors every time.
     """
 
     def __init__(self, topology: Topology, order: int = 3, method: str = "gmres", rtol: float = 1e-6,
@@ -179,6 +181,9 @@ class Solver:
         self._k0_factor = None           # k0 of the last real factorization
         self._ref_its = None             # iterations of the last solve on fresh factors
         self._k = None                   # the current K (CSR arrays), kept until the next solve
+        self._tol_learned = None         # refactor_tol lowered after kept factors fell short
+        self._wall_mask = None           # wall rows of this sweep (only grows), chosen for k0 up to _wall_k0
+        self._wall_k0 = None
         self.info: list[dict] = []
 
     def factorize(self, K, k0=None) -> "Solver":
@@ -240,9 +245,10 @@ class Solver:
         return self
 
     def _close_to_factor(self) -> bool:
-        if not self.refactor_tol or self.k0 is None or self._k0_factor is None or self._ref_its is None:
+        tol = self.refactor_tol if self._tol_learned is None else min(self.refactor_tol, self._tol_learned)
+        if not tol or self.k0 is None or self._k0_factor is None or self._ref_its is None:
             return False
-        return abs(self.k0 ** 2 / self._k0_factor ** 2 - 1) < self.refactor_tol
+        return abs(self.k0 ** 2 / self._k0_factor ** 2 - 1) < tol
 
     def _exact_rows(self, K):
         if self.exact is None:
@@ -267,12 +273,19 @@ class Solver:
         return m if w is None else m | w
 
     def _wall_rows(self):
+        """Higher-order unknowns on metal vertices with k0 h > wall_kh. Across a sweep the set only
+        grows and is chosen for WALL_LOOKAHEAD times the current k0, so the coarse pattern changes at
+        most once per such step in k0 and refactors / kept factors work in between (extra exact rows
+        never hurt convergence)."""
         top = self.topology
         if self.wall_kh is None or self.k0 is None or top.wall_h is None:
             return None
-        sel = (self.k0 * top.wall_h > self.wall_kh).astype(np.float64)
-        touch = np.asarray(top.dof_vertices @ sel).ravel() > 0
-        return touch & top.non_whitney
+        if self._wall_mask is None or self.k0 > self._wall_k0:
+            self._wall_k0 = self.k0 * WALL_LOOKAHEAD
+            sel = (self._wall_k0 * top.wall_h > self.wall_kh).astype(np.float64)
+            touch = (np.asarray(top.dof_vertices @ sel).ravel() > 0) & top.non_whitney
+            self._wall_mask = touch if self._wall_mask is None else (self._wall_mask | touch)
+        return self._wall_mask
 
     @property
     def memory_bytes(self) -> int:
@@ -311,19 +324,24 @@ class Solver:
         elif self.warm_start:
             X0 = self._project(B)
         x0c = None if X0 is None else [np.ascontiguousarray(X0[:, j], dtype=np.complex128) for j in range(B.shape[1])]
+        failed = False
         if self.reused:
             # kept factors: a capped attempt; if it falls short, refactor and continue from where it got
             cap = int(1.5 * self._ref_its) + 3
             xs, its, res = self._pc.solve_columns(cols, x0c, self.method, self.rtol, self.restart, min(cap, self.maxiter))
             if max(res) > self.rtol:
+                # this problem tolerates less: keep factors only up to half this distance from now on
+                self._tol_learned = 0.5 * abs(self.k0 ** 2 / self._k0_factor ** 2 - 1)
                 self._pc.refactor(self._k)
                 self._k0_factor, self.reused, self.refactored = self.k0, False, True
                 xs, its2, res = self._pc.solve_columns(cols, list(xs), self.method, self.rtol, self.restart, self.maxiter)
                 its = [a + b for a, b in zip(its, its2)]
-                self._ref_its = None
+                failed = True        # no clean reference count: the next frequency refactors
         else:
             xs, its, res = self._pc.solve_columns(cols, x0c, self.method, self.rtol, self.restart, self.maxiter)
-        if not self.reused and self._ref_its is None:
+        if failed:
+            self._ref_its = None
+        elif not self.reused and self._ref_its is None:
             self._ref_its = max(its)
         self._k = None
         x = np.column_stack(xs) if len(xs) > 1 else xs[0].reshape(-1, 1)

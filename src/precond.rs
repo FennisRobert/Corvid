@@ -416,6 +416,7 @@ const LMAX_TOL: f64 = 1e-3;
 const LMAX_MINIT: usize = 15;
 const LMAX_MAXIT: usize = 1000;
 /// Power iterations after a refactor (they start from the last vector).
+const LMAX_REFACTOR_MINIT: usize = 10;
 const LMAX_REFACTOR_MAXIT: usize = 20;
 
 impl TwoLevel {
@@ -456,7 +457,7 @@ impl TwoLevel {
         self.k = k;
         self.schwarz_bytes = self.schwarz.memory_bytes();
         self.dense_fallbacks = self.schwarz.dense_fallbacks();
-        self.estimate_lmax(3, LMAX_REFACTOR_MAXIT);
+        self.estimate_lmax(LMAX_REFACTOR_MINIT, LMAX_REFACTOR_MAXIT);
         Ok(())
     }
 
