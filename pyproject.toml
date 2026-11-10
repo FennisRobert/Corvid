@@ -3,8 +3,8 @@ requires = ["maturin>=1.5,<2"]
 build-backend = "maturin"
 
 [project]
-name = "corvid"
-version = "0.5.1"
+name = "corvid-solver"
+version = "0.5.2"
 description = "CORVID: Coarse Operators by Recursive Volume Interpolation of De Rham complexes"
 readme = "README.md"
 license = { text = "AGPL-3.0-or-later" }

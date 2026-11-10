@@ -54,8 +54,10 @@ Prebuilt wheels (macOS, Linux and Windows; Python 3.9 or later) are attached to 
 [GitHub release](https://github.com/FennisRobert/Corvid/releases). Nothing is published to PyPI.
 
 ```sh
-pip install corvid --find-links https://github.com/FennisRobert/Corvid/releases/expanded_assets/v0.5.1
+pip install corvid-solver --find-links https://github.com/FennisRobert/Corvid/releases/expanded_assets/v0.5.2
 ```
+
+The package installs as `corvid-solver` and imports as `corvid`. (PyPI's `corvid` is an unrelated project.)
 
 The coarse factorization uses BLAS: Accelerate on macOS, and elsewhere the `scipy-openblas32` wheel that
 CORVID depends on, loaded at import. `corvid.blas_library()` reports which one is in use, and `CORVID_BLAS`

@@ -13,7 +13,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to build and release, e.g. v0.5.1. Empty: build only."
+        description: "Tag to build and release, e.g. v0.5.2. Empty: build only."
         required: false
         default: ""
 
@@ -100,5 +100,5 @@ jobs:
             Install without Rust or a compiler (macOS, Linux and Windows, Python 3.9 or later):
 
             ```
-            pip install corvid --find-links https://github.com/${{ github.repository }}/releases/expanded_assets/${{ env.TAG }}
+            pip install corvid-solver --find-links https://github.com/${{ github.repository }}/releases/expanded_assets/${{ env.TAG }}
             ```
