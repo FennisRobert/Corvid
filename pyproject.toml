@@ -1,0 +1,36 @@
+[build-system]
+requires = ["maturin>=1.5,<2"]
+build-backend = "maturin"
+
+[project]
+name = "corvid"
+version = "0.5.0"
+description = "CORVID: Coarse Operators by Recursive Volume Interpolation of De Rham complexes"
+readme = "README.md"
+license = { text = "AGPL-3.0-or-later" }
+authors = [{ name = "Robert Fennis" }]
+requires-python = ">=3.9"
+dependencies = ["numpy>=1.21", "scipy>=1.7"]
+keywords = ["maxwell", "fem", "nedelec", "preconditioner", "multigrid", "iterative solver", "electromagnetics"]
+classifiers = [
+    "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Rust",
+    "Topic :: Scientific/Engineering :: Physics",
+    "Topic :: Scientific/Engineering :: Mathematics",
+]
+
+[project.urls]
+Repository = "https://github.com/FennisRobert/Corvid"
+Issues = "https://github.com/FennisRobert/Corvid/issues"
+
+[tool.maturin]
+module-name = "corvid._kernels"
+python-source = "."
+include = [
+    "corvid/**/*.py",
+    { path = "LICENSE", format = ["sdist", "wheel"] },
+    { path = "LICENSE-THIRD-PARTY", format = ["sdist", "wheel"] },
+    { path = "THIRD-PARTY-NOTICES", format = ["sdist", "wheel"] },
+]
+exclude = ["**/__pycache__/**", "tests/**", "target/**", "research/**", "bench/**", "docs/**", "tools/**", "data/**", "reference/**", ".github/**"]

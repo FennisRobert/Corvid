@@ -1,0 +1,27 @@
+# build output
+/target/
+/dist/
+*.so
+*.pyd
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+
+# datasets (~15 GB): EMerge problems, research datasets, benchmark dumps.
+# tests/data/ holds the one small problem the tests and the wheel workflow use.
+/data/
+/research/data/
+/bench/weng/data/
+
+# local reference archive: the helix prototype, design notes and literature PDFs
+/reference/
+
+# notebook build output and fonts (docs/notebook/render.sh)
+/docs/notebook/notebook/
+/docs/notebook/progress.pdf
+/docs/notebook/fonts/
+
+.DS_Store
+.vscode/
+.idea/

@@ -1,0 +1,10 @@
+box_abc      n= 33662 pml=0.00 epl=5.6/3.4  none:   12 0.31s  auto:   12 (+30) 0.32s
+box_d8       n= 35194 pml=0.77 epl=6.1/3.2  none:  147 1.49s  auto:   12 (+22428) 0.68s
+box_d4       n= 35194 pml=0.77 epl=6.1/3.2  none:   64 0.67s  auto:   12 (+22428) 0.63s
+box_d2       n= 35194 pml=0.77 epl=6.1/3.2  none:   23 0.41s  auto:   11 (+22428) 0.62s
+box_phase    n= 35194 pml=0.77 epl=6.1/3.2  none:   20 0.45s  auto:   11 (+22428) 0.66s
+box_mag      n= 35194 pml=0.00 epl=6.1/3.2  none:  300 4.49s  auto:  300 (+0) 4.57s
+box_d8_nl8   n=218204 pml=0.89 epl=10.6/3.4  none:  209 15.67s  auto:   11 (+159768) 6.12s
+box_d8_b5    n= 87824 pml=0.66 epl=5.6/3.3  none:  212 5.56s  auto:   13 (+47503) 1.61s
+box_abc_r30  n=  6340 pml=0.01 epl=3.6/1.7  none:   78 0.15s  auto:   80 (+18) 0.15s
+box_d8_r30   n= 31768 pml=0.86 epl=5.9/2.2  none:  140 1.12s  auto:   14 (+22614) 0.58s

@@ -1,0 +1,71 @@
+Third-party code included in CORVID
+===================================
+
+This file states WHAT is third-party and WHERE it came from.
+The licence texts those origins require are in THIRD-PARTY-NOTICES, which is
+the file that must ship with every binary release.
+
+--------------------------------------------------------------------------------
+No third-party source code
+--------------------------------------------------------------------------------
+
+CORVID compiles no third-party source. Its sparse direct solves use SPARTA
+(Copyright (C) 2026 Robert Fennis and Milan Rother, AGPL-3.0-or-later), linked
+as a Rust crate. The other Rust crates CORVID links are listed with their
+licences in THIRD-PARTY-NOTICES. NumPy and SciPy are Python dependencies,
+installed separately and not distributed with CORVID.
+
+--------------------------------------------------------------------------------
+Algorithms followed, with no code taken
+--------------------------------------------------------------------------------
+
+  Arnold, Falk & Winther       vertex-patch (Arnold-Falk-Winther) Schwarz
+                               smoothing for H(curl): Multigrid in H(div) and
+                               H(curl), Numer. Math. 85 (2000) 197-217.
+                               src/patch.rs.
+
+  Phillips & Fischer           fourth-kind Chebyshev smoothing: Optimal
+                               Chebyshev smoothers and one-sided V-cycles,
+                               arXiv:2210.03179 (2022). src/precond.rs.
+
+  Hiptmair                     distributive (hybrid) smoothing on the gradient
+                               space: Multigrid method for Maxwell's equations,
+                               SIAM J. Numer. Anal. 36 (1998) 204-225. Research
+                               path only (PSolver, research/).
+
+  Pasciak & Vassilevski        exact de Rham sequences on agglomerated
+                               elements: Exact de Rham sequences of spaces
+                               defined on macro-elements in two and three
+                               spatial dimensions, SIAM J. Sci. Comput. 30
+                               (2008) 2427-2446. The design of LLNL's parELAG
+                               library was followed; no parELAG code is used.
+                               corvid/amge/.
+
+  Palace (AWS Labs)            the structure of the p-multigrid preconditioner
+                               with Chebyshev smoothing and a power-iteration
+                               spectral estimate follows Palace's design. No
+                               Palace code is used.
+
+  van der Vorst & Melissen     COCG for complex symmetric systems: IEEE Trans.
+                               Magn. 26 (1990) 706-708. src/krylov.rs.
+
+  Saad & Schultz               GMRES: SIAM J. Sci. Stat. Comput. 7 (1986)
+                               856-869. src/krylov.rs.
+
+  Tinney & Walker; George & Liu  minimum-degree ordering of the vertex blocks:
+                               Proc. IEEE 55 (1967); Computer Solution of Large
+                               Sparse Positive Definite Systems (1981).
+                               src/patch.rs.
+
+--------------------------------------------------------------------------------
+Original CORVID work
+--------------------------------------------------------------------------------
+
+Everything else in this repository is original and carries no third-party
+licence: the Rust kernels and preconditioner (src/), the Python package
+(corvid/), the tests, the benchmarks and the research scripts. Copyright (C)
+2026 Robert Fennis, licensed under the GNU Affero General Public License,
+version 3 or later (LICENSE).
+
+Much of the code was written with Claude (Anthropic), an AI model, under the
+direction of Robert Fennis.
