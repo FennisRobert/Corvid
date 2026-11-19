@@ -19,8 +19,8 @@ def main():
     print(f"corvid {corvid.__version__} from {os.path.dirname(corvid.__file__)}, threads {corvid.get_num_threads()}, "
           f"BLAS {corvid.blas_library()}")
     ok = True
-    if sys.platform != "darwin" and corvid.blas_library() == "portable loops":
-        print("no BLAS found for the coarse factorization")
+    if "scalar" in corvid.blas_library():
+        print("no vector kernel set was selected for the coarse factorization")
         ok = False
     f = np.load(os.path.join(HERE, "data", "model1_p1.npz"))
     csr = lambda k: sp.csr_matrix((f[k + "_data"], f[k + "_indices"], f[k + "_indptr"]), shape=tuple(f[k + "_shape"]))

@@ -20,6 +20,10 @@ unstructured tetrahedral meshes, including absorbing boundaries, ports, PMLs and
 preconditions the **true, indefinite operator K** (no shifted operator) and solves it with COCG or GMRES. The
 core is multithreaded Rust, behind a small Python API.
 
+In multigrid terms CORVID is a **two-level p-multigrid**: smoothing on the second-order space, and an exact
+sparse direct solve on the first-order (Whitney) edge space beneath it. That direct solve makes it cheaper than
+a full factorization, but **not an O(n) solver**: its memory grows as O(n^4/3) (see [Scaling](#scaling)).
+
 It is built for the regime where a direct solver works but costs too much memory, and where frequency
 sweeps make you solve the same mesh many times. CORVID is the iterative solver of
 [EMerge](https://github.com/FennisRobert/EMerge).
@@ -50,18 +54,17 @@ The peak-RAM figures are from an 11-point sweep. `bench/weng/` holds the model a
 
 ## Install
 
-Prebuilt wheels (macOS, Linux and Windows; Python 3.9 or later) are attached to each
-[GitHub release](https://github.com/FennisRobert/Corvid/releases). Nothing is published to PyPI.
+Prebuilt wheels (macOS, Linux and Windows; Python 3.9 or later) are on PyPI and attached to each
+[GitHub release](https://github.com/FennisRobert/Corvid/releases):
 
 ```sh
-pip install corvid-solver --find-links https://github.com/FennisRobert/Corvid/releases/expanded_assets/v0.5.2
+pip install corvid-solver
 ```
 
 The package installs as `corvid-solver` and imports as `corvid`. (PyPI's `corvid` is an unrelated project.)
 
-The coarse factorization uses BLAS: Accelerate on macOS, and elsewhere the `scipy-openblas32` wheel that
-CORVID depends on, loaded at import. `corvid.blas_library()` reports which one is in use, and `CORVID_BLAS`
-can point at another OpenBLAS or MKL library.
+The coarse factorization uses the dense kernels compiled into SPARTA (SpartaBLAS, or Apple's Accelerate on
+Macs without SME), so no BLAS has to be installed. `corvid.blas_library()` reports which one is in use.
 
 To build from source you need a Rust toolchain and network access (SPARTA is fetched from GitHub):
 
@@ -94,6 +97,11 @@ for K, b, k0 in sweep:            # K: the solved system (CSR or CSC), b: (n,) o
 
 ## How it works
 
+CORVID is a p-multigrid preconditioner with two levels: the second-order Nédélec space n, and its first-order
+(Whitney) edge subspace, about a fifth of the unknowns. The Whitney level is not coarsened further but
+factored exactly. On the fine level the smoother is Chebyshev scaled by vertex-patch Schwarz. The design
+follows the p-multigrid of [Palace](https://github.com/awslabs/palace).
+
 ```mermaid
 flowchart LR
     r([residual r]) --> pre["Chebyshev smoothing<br/>scaled by vertex-patch Schwarz"]
@@ -120,8 +128,29 @@ flowchart LR
      continues.
    - Each solve starts from the minimum-residual combination of the last solutions.
 
+### Scaling
+
+Everything except the coarse solve is linear in the number of unknowns n: the operator, the Schwarz blocks
+(one per vertex, of bounded size), the Chebyshev smoothing and the Krylov vectors cost O(n) memory and O(n)
+work per iteration. The coarse solve does not. It is a sparse direct factorization on the Whitney unknowns of
+a 3D mesh, m ≈ n/5 of them, and with a nested-dissection ordering a 3D factorization grows as:
+
+| | Coarse level | Whole solver |
+|---|---|---|
+| Memory | O(m^4/3) | **O(n^4/3)** |
+| Factorization time | O(m²) | O(n²) |
+| Solve time per iteration | O(m^4/3) | O(n^4/3) |
+
+The exponents are those of a direct solve of the full problem. The gain is in the constant: a factor of
+m ≈ n/5 needs about (1/5)^4/3 ≈ 1/9 of the memory and (1/5)² = 1/25 of the work. At today's problem sizes
+the O(n) terms still dominate, which is why the Weng filter saves about a third of peak RAM rather than
+nine tenths. For much larger meshes the coarse factorization will dominate, and it then sets the limit.
+
+The iteration count is not guaranteed to be independent of the mesh or the frequency either. Problems with
+more wavelengths across the domain, or with weak losses near resonance, take more iterations.
+
 For meshes whose Whitney level is too large to factor, `corvid.amge` contains a prototype of the agglomerated
-hierarchy that gives CORVID its name. Tetrahedra are grouped into polyhedral volumes, recursively. On every
+hierarchy that gives CORVID its name, and the way towards O(n) memory. Tetrahedra are grouped into polyhedral volumes, recursively. On every
 level the coarse spaces commute exactly with gradient and curl, so each level is again an exact de Rham
 complex (Pasciak & Vassilevski).
 
@@ -135,7 +164,7 @@ bench/weng/          the Weng filter benchmark: EMerge model, solver dumps, timi
 research/            experiments, probes and dataset generators behind the design (see docs/)
 docs/                EMerge interface notes, research notes and the research notebook (Typst)
 tools/               release helpers (third-party notices)
-.github/workflows/   wheels for macOS, Linux and Windows, attached to GitHub releases
+.github/workflows/   wheels for macOS, Linux and Windows, published to PyPI and GitHub releases
 ```
 
 Tests: `python tests/test_api.py` and `python tests/test_sweep.py`. The full EMerge datasets (`data/aegis/`)

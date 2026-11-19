@@ -13,7 +13,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BUILD_ONLY = {"heck", "indoc", "proc-macro2", "pyo3-build-config", "pyo3-macros", "pyo3-macros-backend",
               "quote", "syn", "target-lexicon", "unicode-ident"}
 # Same authors, same licence as CORVID (LICENSE).
-OWN = {"sparta-solver", "scalpel"}
+OWN = {"sparta-solver", "sparta-blas", "scalpel"}
 
 
 def main():

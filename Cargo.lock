@@ -25,7 +25,7 @@ checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 
 [[package]]
 name = "corvid"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "num-complex",
  "numpy",
@@ -327,7 +327,7 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 [[package]]
 name = "scalpel"
 version = "0.1.0"
-source = "git+https://github.com/FennisRobert/SPARTA?rev=7d82cdc#7d82cdca257e1136c49e0cf84fe0cfc01c38ec4b"
+source = "git+https://github.com/FennisRobert/SPARTA?tag=v0.3.9#fc93ffd7baae5a78b017ca3ad81d2790b39f3dfa"
 dependencies = [
  "rayon",
 ]
@@ -375,16 +375,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "sparta-blas"
+version = "0.1.0"
+source = "git+https://github.com/FennisRobert/SPARTA?tag=v0.3.9#fc93ffd7baae5a78b017ca3ad81d2790b39f3dfa"
+dependencies = [
+ "num-complex",
+ "rayon",
+]
+
+[[package]]
 name = "sparta-solver"
-version = "0.3.2"
-source = "git+https://github.com/FennisRobert/SPARTA?rev=7d82cdc#7d82cdca257e1136c49e0cf84fe0cfc01c38ec4b"
+version = "0.3.9"
+source = "git+https://github.com/FennisRobert/SPARTA?tag=v0.3.9#fc93ffd7baae5a78b017ca3ad81d2790b39f3dfa"
 dependencies = [
  "ash",
- "libloading",
  "num-complex",
  "rayon",
  "scalpel",
  "serde_json",
+ "sparta-blas",
 ]
 
 [[package]]
