@@ -1,6 +1,7 @@
 //! CORVID's compiled solve phase: threaded sparse kernels, the preconditioner
 //! and the outer Krylov solvers. CSR with i32 indices, f64 or complex128.
 
+mod amge;
 mod csr;
 mod direct;
 mod krylov;
@@ -11,10 +12,10 @@ mod vecops;
 
 use csr::Csr;
 use numpy::{IntoPyArray, PyArray1};
-use precond::{Corvid, DistRelax, Precond, Preconditioner, TwoLevel};
+use precond::{Corvid, Deflated, DistRelax, Precond, Preconditioner, TwoLevel};
 
 use num_complex::Complex64;
-use numpy::{PyReadonlyArray1, PyReadwriteArray1};
+use numpy::{PyReadonlyArray1, PyReadonlyArray2, PyReadwriteArray1};
 use pyo3::prelude::*;
 use rayon::prelude::*;
 use std::collections::HashMap;
@@ -377,10 +378,11 @@ struct TwoLevelSolver {
 #[pymethods]
 impl TwoLevelSolver {
     #[new]
-    #[pyo3(signature = (k, patch_ptr, patch_idx, inj, order=2, sparse_blocks=false, threads=None))]
+    #[pyo3(signature = (k, patch_ptr, patch_idx, inj, order=2, sparse_blocks=false, threads=None, exact_coarse=true))]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         k: CsrC, patch_ptr: PyReadonlyArray1<i64>, patch_idx: PyReadonlyArray1<i32>, inj: PyReadonlyArray1<i64>,
-        order: usize, sparse_blocks: bool, threads: Option<usize>,
+        order: usize, sparse_blocks: bool, threads: Option<usize>, exact_coarse: bool,
     ) -> PyResult<Self> {
         let threads = resolve_threads(threads)?;
         let (pp, pi) = (patch_ptr.as_slice()?, patch_idx.as_slice()?);
@@ -392,8 +394,90 @@ impl TwoLevelSolver {
         let t = std::time::Instant::now();
         let ks = csr::Split::from_parts(k.3, k.4, k.0.as_slice()?, k.1.as_slice()?, vals);
         precond::tick(&precond::T_B_SPLIT, t);
-        let pc = run(threads, move || TwoLevel::new(ks, vals, patches, inj, order, sparse_blocks)).map_err(err)?;
+        let pc = run(threads, move || TwoLevel::new(ks, vals, patches, inj, order, sparse_blocks, exact_coarse)).map_err(err)?;
         Ok(TwoLevelSolver { pc, threads })
+    }
+
+    /// The opt-in multilevel coarse solve on the `inj` rows (in `inj` order): per level
+    /// (A, P, P^T, G, G^T, G^T A G), then the coarsest operator, factorized here. Replaces any
+    /// earlier one; its deflation starts empty (see set_deflation).
+    #[pyo3(signature = (levels, coarsest, colored=true, color_min_rows=2000))]
+    fn set_multilevel(&mut self, levels: Vec<(CsrC, CsrR, CsrR, CsrR, CsrR, CsrC)>, coarsest: CsrC, colored: bool, color_min_rows: usize) -> PyResult<()> {
+        let mut lv = Vec::new();
+        for (a, p, pt, g, gt, ag) in &levels {
+            lv.push((csr_c(a)?, csr_r(p)?, csr_r(pt)?, csr_r(g)?, csr_r(gt)?, csr_c(ag)?));
+        }
+        let coarsest = csr_c(&coarsest)?;
+        self.pc.ml = None;                                   // release the previous hierarchy first
+        let ml = run(self.threads, move || -> Result<Deflated, String> {
+            Deflated::new(Corvid::new(lv, &coarsest, 1, colored, color_min_rows)?)
+        })
+        .map_err(err)?;
+        self.pc.ml = Some(ml);
+        Ok(())
+    }
+
+    /// As set_multilevel, with the Galerkin operators formed here (threaded): A = K[inj][:, inj] of
+    /// the current K, then per level A_{l+1} = P_l^T A_l P_l and G_l^T A_l G_l. `ps` / `gs` are the
+    /// hierarchy's prolongations and gradients (level 0 rows in `inj` order).
+    #[pyo3(signature = (k, inj, ps, gs, colored=true, color_min_rows=2000))]
+    fn set_multilevel_galerkin(
+        &mut self, k: CsrC, inj: PyReadonlyArray1<i64>, ps: Vec<CsrR>, gs: Vec<CsrR>, colored: bool, color_min_rows: usize,
+    ) -> PyResult<()> {
+        if ps.is_empty() || ps.len() != gs.len() {
+            return Err(err("need one gradient per prolongation, and at least one level".into()));
+        }
+        let kc = csr_c(&k)?;
+        let inj: Vec<usize> = inj.as_slice()?.iter().map(|&v| v as usize).collect();
+        let ps: Vec<Csr<f64>> = ps.iter().map(csr_r).collect::<PyResult<_>>()?;
+        let gs: Vec<Csr<f64>> = gs.iter().map(csr_r).collect::<PyResult<_>>()?;
+        self.pc.ml = None;                                   // release the previous hierarchy first
+        let ml = run(self.threads, move || -> Result<Deflated, String> {
+            let mut a = csr::submatrix(&kc, &inj);
+            drop(kc);
+            let mut lv = Vec::with_capacity(ps.len());
+            for (p, g) in ps.into_iter().zip(gs) {
+                if p.nrows != a.nrows || g.nrows != a.nrows {
+                    return Err("prolongation / gradient rows do not match the level".into());
+                }
+                let pt = csr::transpose(&p);
+                let gt = csr::transpose(&g);
+                let ag: Csr<Complex64> = csr::spgemm(&gt, &csr::spgemm::<Complex64, f64, Complex64>(&a, &g));
+                let ac: Csr<Complex64> = csr::spgemm(&pt, &csr::spgemm::<Complex64, f64, Complex64>(&a, &p));
+                lv.push((a, p, pt, g, gt, ag));
+                a = ac;
+            }
+            Deflated::new(Corvid::new(lv, &a, 1, colored, color_min_rows)?)
+        })
+        .map_err(err)?;
+        self.pc.ml = Some(ml);
+        Ok(())
+    }
+
+    /// Modes solved exactly around the V-cycle: `z` holds the m basis vectors one after the other
+    /// (Z column-major), `si` = (Z^T A Z)^{-1} row-major.
+    fn set_deflation(&mut self, z: PyReadonlyArray1<Complex64>, si: PyReadonlyArray1<Complex64>, m: usize) -> PyResult<()> {
+        let ml = self.pc.ml.as_mut().ok_or_else(|| err("no multilevel coarse solve set".into()))?;
+        ml.set_deflation(z.as_slice()?.to_vec(), si.as_slice()?.to_vec(), m).map_err(err)
+    }
+
+    /// One V-cycle of the multilevel coarse solve, without deflation (rows in `inj` order).
+    fn ml_vcycle<'py>(&self, py: Python<'py>, r: PyReadonlyArray1<'py, Complex64>) -> PyResult<Bound<'py, PyArray1<Complex64>>> {
+        let ml = self.pc.ml.as_ref().ok_or_else(|| err("no multilevel coarse solve set".into()))?;
+        let r = r.as_slice()?;
+        Ok(run(self.threads, || ml.vcycle(r)).into_pyarray_bound(py))
+    }
+
+    /// Bytes held by the multilevel coarse solve (0 without one).
+    #[getter]
+    fn ml_bytes(&self) -> usize {
+        self.pc.ml.as_ref().map_or(0, |m| m.memory_bytes())
+    }
+
+    /// Nonzeros of the multilevel coarse solve's coarsest factor (0 without one).
+    #[getter]
+    fn ml_coarsest_factor_nnz(&self) -> usize {
+        self.pc.ml.as_ref().map_or(0, |m| m.coarsest_factor_nnz())
     }
 
     /// New values of K on the same sparsity pattern (the caller checks the pattern): reuses the
@@ -537,6 +621,52 @@ impl TwoLevelSolver {
     }
 }
 
+type SpOut<'py> = (Bound<'py, PyArray1<i64>>, Bound<'py, PyArray1<i64>>, Bound<'py, PyArray1<f64>>, usize, usize);
+
+fn sp_out<'py>(py: Python<'py>, m: &amge::Sp) -> SpOut<'py> {
+    (
+        m.ptr.iter().map(|&x| x as i64).collect::<Vec<_>>().into_pyarray_bound(py),
+        m.idx.iter().map(|&x| x as i64).collect::<Vec<_>>().into_pyarray_bound(py),
+        m.val.clone().into_pyarray_bound(py),
+        m.nrows,
+        m.ncols,
+    )
+}
+
+/// The wavelength-capped AMGe hierarchy of the Whitney level (corvid/amge/capped.py, in Rust).
+/// coords (V, 3), tets (T, 4), edges (E, 2) (Whitney orientation edges[e, 0] -> edges[e, 1]),
+/// free (E,) bool: the solved Whitney edges, k_tet (T,): the local wavenumber per tet.
+/// Returns (Ps, Gs, sizes, checks): Ps[l] maps level l+1 to level l on free edges (level 0 in
+/// increasing edge order), Gs[l] the gradient of level l on its free edges, as
+/// (indptr, indices, data, nrows, ncols); sizes the free edges per level; with `check`, per level the
+/// max violations of D1 P1 = P2 D1c, D1c D0c = 0, D2c D1c = 0 and of the PEC rows.
+#[pyfunction]
+#[pyo3(signature = (coords, tets, edges, free, k_tet, kappa, target=32, max_levels=10, check=false, threads=None))]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn amge_hierarchy<'py>(
+    py: Python<'py>, coords: PyReadonlyArray2<'py, f64>, tets: PyReadonlyArray2<'py, i64>, edges: PyReadonlyArray2<'py, i64>,
+    free: PyReadonlyArray1<'py, bool>, k_tet: PyReadonlyArray1<'py, f64>, kappa: f64, target: usize, max_levels: usize,
+    check: bool, threads: Option<usize>,
+) -> PyResult<(Vec<SpOut<'py>>, Vec<SpOut<'py>>, Vec<usize>, Vec<[f64; 4]>)> {
+    let threads = resolve_threads(threads)?;
+    let (c, t, e) = (coords.as_array(), tets.as_array(), edges.as_array());
+    if c.ncols() != 3 || t.ncols() != 4 || e.ncols() != 2 {
+        return Err(pyo3::exceptions::PyValueError::new_err("coords (V, 3), tets (T, 4) and edges (E, 2) expected"));
+    }
+    let x: Vec<[f64; 3]> = c.rows().into_iter().map(|r| [r[0], r[1], r[2]]).collect();
+    let tt: Vec<[usize; 4]> = t.rows().into_iter().map(|r| [r[0] as usize, r[1] as usize, r[2] as usize, r[3] as usize]).collect();
+    let ee: Vec<[usize; 2]> = e.rows().into_iter().map(|r| [r[0] as usize, r[1] as usize]).collect();
+    let free = free.as_slice()?.to_vec();
+    let k_tet = k_tet.as_slice()?.to_vec();
+    if free.len() != ee.len() || k_tet.len() != tt.len() {
+        return Err(pyo3::exceptions::PyValueError::new_err("free needs one entry per edge and k_tet one per tet"));
+    }
+    let h = py
+        .allow_threads(|| run(threads, || amge::hierarchy(&x, &tt, &ee, &free, &k_tet, kappa, target, max_levels, check)))
+        .map_err(err)?;
+    Ok((h.ps.iter().map(|m| sp_out(py, m)).collect(), h.gs.iter().map(|m| sp_out(py, m)).collect(), h.sizes, h.checks))
+}
+
 #[pymodule]
 fn _kernels(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Default 8 threads: bandwidth-bound kernels are within ~8% of their best
@@ -566,6 +696,7 @@ fn _kernels(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<research::RxSweep>()?;
     m.add_function(wrap_pyfunction!(timers, m)?)?;
     m.add_function(wrap_pyfunction!(row_stats, m)?)?;
+    m.add_function(wrap_pyfunction!(amge_hierarchy, m)?)?;
     m.add_function(wrap_pyfunction!(_load_blas, m)?)?;
     m.add_function(wrap_pyfunction!(blas_library, m)?)?;
     m.add_function(wrap_pyfunction!(bench_direct, m)?)?;

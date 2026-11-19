@@ -14,6 +14,8 @@ Whitney rows. It works on K itself, no shifted operator.
 """
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import scipy.sparse as sp
 
@@ -21,6 +23,14 @@ from . import _kernels
 
 EDGE_WHITNEY, EDGE_OTHER, FACE = 0, 1, 2
 WALL_LOOKAHEAD = 1.2      # wall rows are selected for this multiple of k0 (see Solver._wall_rows)
+# coarsen_kh: modes of the V-cycle's error propagation I - V A with |mu| above DEFLATE_MU are deflated;
+# the eigensolve looks for DEFLATE_K of them, doubling up to DEFLATE_KMAX while all it finds are bad.
+# The deflation only needs those modes roughly: tolerance 1e-2 finds the same ones in a fifth of the
+# V-cycles of 1e-4 (model5: 21 against 96, same outer iterations)
+DEFLATE_MU = 0.8
+DEFLATE_K = 8
+DEFLATE_KMAX = 48
+DEFLATE_TOL = 1e-2
 
 
 class Topology:
@@ -30,9 +40,14 @@ class Topology:
     an edge index for kinds 0 and 1, a triangle index for kind 2) and its kind
     (`dof_kind`: 0 = lowest-order edge DOF, 1 = other edge DOF, 2 = face DOF),
     plus the node lists of the edges (E, 2) and triangles (F, 3).
+
+    Optional, for Solver(coarsen_kh > 0) only: `tets` (T, 4) on the same vertex numbering as the
+    edges, `coords` (the node coordinates) and `tet_index` (T,), the refractive index sqrt(er ur)
+    of every tet (1 when not given: too low inside dielectrics, so the coarsening stops later than
+    it should there).
     """
 
-    def __init__(self, dof_entity, dof_kind, edges, tris, wall_vertices=None, coords=None):
+    def __init__(self, dof_entity, dof_kind, edges, tris, wall_vertices=None, coords=None, tets=None, tet_index=None):
         dof_entity = np.asarray(dof_entity, dtype=np.int64).ravel()
         dof_kind = np.asarray(dof_kind, dtype=np.int8).ravel()
         edges = _as_rows(edges, 2)
@@ -59,11 +74,23 @@ class Topology:
         self.block_idx = inc.indices.astype(np.int32)
         self.whitney = np.flatnonzero(dof_kind == EDGE_WHITNEY).astype(np.int64)
         self.non_whitney = dof_kind != EDGE_WHITNEY
-        # optional geometry: metal-touching vertices and their longest incident edge (for the wall rule)
-        self.wall_h = None
-        if wall_vertices is not None and coords is not None:
+        # optional geometry for the coarsened Whitney level (Solver(coarsen_kh > 0))
+        X = None
+        if coords is not None:
             X = np.asarray(coords, dtype=np.float64)
             X = X.T if X.shape[0] == 3 and X.shape[1] != 3 else X
+        self.coords = X
+        self.edges = edges
+        self.whitney_edges = dof_entity[self.whitney]
+        self.tets = None if tets is None else _as_rows(tets, 4)
+        self.tet_index = None
+        if tet_index is not None:
+            self.tet_index = np.asarray(tet_index, dtype=np.float64).ravel()
+            if self.tets is None or self.tet_index.shape != (len(self.tets),):
+                raise ValueError("tet_index needs tets and one value per tet")
+        # optional geometry: metal-touching vertices and their longest incident edge (for the wall rule)
+        self.wall_h = None
+        if wall_vertices is not None and X is not None:
             h = np.linalg.norm(X[edges[:, 0]] - X[edges[:, 1]], axis=1)
             vh = np.zeros(nv)
             np.maximum.at(vh, edges[:, 0], h)
@@ -71,31 +98,44 @@ class Topology:
             self.wall_h = np.where(np.asarray(wall_vertices, bool), vh, 0.0)[keep]
 
     @classmethod
-    def nedelec2(cls, edges, tris, solve_ids, nodes=None):
-        """EMerge's second-order Nedelec layout: global DOFs are four blocks,
-        [edge DOF 1 (Whitney) | edge DOF 2 | face DOF 1 | face DOF 2], each in mesh
-        edge / triangle order. `solve_ids` are the global DOFs that are solved,
-        in the order of the solved system's rows. With the node coordinates `nodes`
-        ((V, 3) or (3, V)) the metal walls are located (vertices of eliminated DOFs) for
-        the wall rule of Solver.factorize(K, k0)."""
+    def nedelec2(cls, edges, tris, solve_ids, nodes=None, edge_dofs=2, face_dofs=2, tets=None, tet_index=None):
+        """EMerge's Nedelec layout (its `Nedelec2` field, for every ElementSpace): global DOFs
+        are `edge_dofs` blocks of edge DOFs followed by `face_dofs` blocks of face DOFs,
+        [edge DOF 1 (Whitney) | edge DOF 2 | ... | face DOF 1 | ...], each block in mesh
+        edge / triangle order. The counts are EMerge's `dofset.set3d.n_edge_dofs` and
+        `n_face_dofs`; the defaults (2, 2) are the second-order mixed spaces. The first edge
+        block must be the Whitney function Li grad Lj - Lj grad Li (edge DoF 0, the first
+        entry of every EMerge ElementSpace).
+
+        `solve_ids` are the global DOFs that are solved, in the order of the solved system's
+        rows. With the node coordinates `nodes` ((V, 3) or (3, V)) the metal walls are located
+        (vertices of eliminated DOFs) for the wall rule of Solver.factorize(K, k0). `tets` and
+        `tet_index` (with `nodes`) enable Solver(coarsen_kh > 0); see the class docstring."""
+        edge_dofs, face_dofs = int(edge_dofs), int(face_dofs)
+        if edge_dofs < 1 or face_dofs < 0:
+            raise ValueError("need edge_dofs >= 1 (the first is Whitney) and face_dofs >= 0")
         edges = _as_rows(edges, 2)
         tris = _as_rows(tris, 3)
         ne, nf = len(edges), len(tris)
+        n_edge = edge_dofs * ne
+        n_total = n_edge + face_dofs * nf
         g = np.asarray(solve_ids, dtype=np.int64).ravel()
-        if g.size and (g.min() < 0 or g.max() >= 2 * ne + 2 * nf):
-            raise ValueError("solve_ids outside the 2*E + 2*F second-order layout")
-        kind = np.where(g < ne, EDGE_WHITNEY, np.where(g < 2 * ne, EDGE_OTHER, FACE)).astype(np.int8)
-        ent = np.where(g < ne, g, np.where(g < 2 * ne, g - ne, np.where(g < 2 * ne + nf, g - 2 * ne, g - 2 * ne - nf)))
+        if g.size and (g.min() < 0 or g.max() >= n_total):
+            raise ValueError(f"solve_ids outside the {edge_dofs}*E + {face_dofs}*F layout "
+                             f"(max {g.max()}, layout size {n_total})")
+        on_edge = g < n_edge
+        kind = np.where(g < ne, EDGE_WHITNEY, np.where(on_edge, EDGE_OTHER, FACE)).astype(np.int8)
+        ent = np.where(on_edge, g % ne, (g - n_edge) % max(nf, 1))
         wall = None
         if nodes is not None:
             nv = int(max(edges.max(initial=-1), tris.max(initial=-1))) + 1
-            solved = np.zeros(2 * ne + 2 * nf, bool); solved[g] = True
+            solved = np.zeros(n_total, bool); solved[g] = True
             elim = np.flatnonzero(~solved)
             wall = np.zeros(nv, bool)
-            on_e = elim < 2 * ne
+            on_e = elim < n_edge
             wall[edges[elim[on_e] % ne].ravel()] = True
-            wall[tris[(elim[~on_e] - 2 * ne) % nf].ravel()] = True
-        return cls(ent, kind, edges, tris, wall_vertices=wall, coords=nodes)
+            wall[tris[(elim[~on_e] - n_edge) % max(nf, 1)].ravel()] = True
+        return cls(ent, kind, edges, tris, wall_vertices=wall, coords=nodes, tets=tets, tet_index=tet_index)
 
     @property
     def block_entries(self) -> int:
@@ -147,12 +187,29 @@ class Solver:
              operator to the new K. A solve on such kept factors that needs clearly more iterations
              than the last fresh one is stopped, refactored and continued, and the Solver then keeps
              factors only up to half that distance. 0 refactors every time.
+    coarsen_kh: experimental, opt-in (0 = off, the default). Instead of factorizing the Whitney rows
+             exactly, coarsen them: an agglomerated multilevel hierarchy (exact de Rham coarse spaces)
+             in which every aggregate keeps k_loc * H <= coarsen_kh (H its bounding-box diagonal,
+             k_loc = k0 * the largest refractive index in it), so it only coarsens where the mesh is
+             finer than the wave needs; one V-cycle (symmetric Gauss-Seidel Hiptmair, exact solve on
+             the coarsest level) replaces the exact solve, and the few modes that V-cycle amplifies
+             (near-resonant modes the coarse levels misplace) are found by an eigensolve and solved
+             exactly around it. 0.6 is the tested value (model5, 1.75M unknowns: 15 iterations
+             against 14 with the exact solve, coarsest factor 20 % of the exact one). Needs `tets`
+             and node coordinates in the Topology (and `tet_index` in dielectrics). Falls back to the
+             exact solve, with a warning, when PML or metal-wall rows are solved exactly (n_exact > 0)
+             or nothing coarsens. The hierarchy is built in Rust (6 s for 400k tets, three levels) and
+             kept across a sweep; per frequency, the Galerkin operators and the deflation eigensolve
+             (Python / SciPy) take about as long again.
+    coarsen_k0: the largest k0 the hierarchy must hold for (the top of the sweep). None: 1.2 x the
+             first k0, rebuilt when a later k0 exceeds it.
     """
 
     def __init__(self, topology: Topology, order: int = 3, method: str = "gmres", rtol: float = 1e-6,
                  maxiter: int = 500, restart: int = 100, exact="auto", pml_depth: int = 2, wall_kh=1.0,
                  pml_strong: float = 2.5, sparse_blocks: bool = True, threads: int | None = None,
-                 warm_start: bool = True, refactor_tol: float = 0.2, history: int = 16):
+                 warm_start: bool = True, refactor_tol: float = 0.2, history: int = 16,
+                 coarsen_kh: float = 0.0, coarsen_k0: float | None = None):
         if method not in ("gmres", "cocg"):
             raise ValueError("method must be 'gmres' or 'cocg'")
         if threads is not None and int(threads) < 1:
@@ -185,6 +242,16 @@ class Solver:
         self._wall_mask = None           # wall rows of this sweep (only grows), chosen for k0 up to _wall_k0
         self._wall_k0 = None
         self.info: list[dict] = []
+        if coarsen_kh is None or float(coarsen_kh) < 0:
+            raise ValueError("coarsen_kh must be >= 0 (0 turns the coarsening off)")
+        self.coarsen_kh = float(coarsen_kh)
+        self.coarsen_k0 = None if coarsen_k0 is None else float(coarsen_k0)
+        self.coarsen_active = False      # the current factorization uses the coarsened Whitney level
+        self.coarsen_levels: list[int] = []   # free Whitney edges per level of the hierarchy
+        self.coarsen_setup_s = 0.0       # seconds spent building the hierarchy (once per sweep)
+        self.n_deflated = 0              # modes solved exactly around the V-cycle
+        self._hier = None                # (coarsen_kh, k0 it holds for, Ps, Gs) in the solved rows' order
+        self._coarsen_warned: set[str] = set()
 
     def factorize(self, K, k0=None) -> "Solver":
         """Build the preconditioner for the solved system matrix K (n x n). `k0` (free-space
@@ -225,7 +292,8 @@ class Solver:
             idx = np.ascontiguousarray(idx[np.repeat(keep, sizes)], dtype=np.int32)
             ptr = np.r_[0, np.cumsum(sizes[keep])].astype(np.int64)
         self.n_blocks = len(ptr) - 1
-        key = (K.shape, K.nnz, len(coarse), hash(coarse.tobytes()), self.order, self.sparse_blocks, self.threads)
+        ml = self._use_multilevel()
+        key = (K.shape, K.nnz, len(coarse), hash(coarse.tobytes()), self.order, self.sparse_blocks, self.threads, ml)
         same = self._pc is not None and self._key is not None and self._key[0] == key \
             and _same_pattern(self._key[1], self._key[2], k[0], k[1])
         self._k = k
@@ -239,10 +307,99 @@ class Solver:
         else:
             self._pc = None                                    # release the previous factorization first
             self._pc = _kernels.TwoLevelSolver(k, ptr, idx, coarse, order=self.order, sparse_blocks=self.sparse_blocks,
-                                               threads=None if self.threads is None else int(self.threads))
+                                               threads=None if self.threads is None else int(self.threads),
+                                               exact_coarse=not ml)
             self._k0_factor, self._ref_its = self.k0, None
+        self.coarsen_active = ml
+        if ml and not self.reused:
+            self._setup_multilevel(k)
         self._key = (key, k[0], k[1])
         return self
+
+    # ---- opt-in coarsened Whitney level (coarsen_kh > 0)
+
+    def _coarsen_off(self, why: str) -> bool:
+        if why not in self._coarsen_warned:
+            self._coarsen_warned.add(why)
+            warnings.warn(f"CORVID coarsen_kh={self.coarsen_kh}: {why}; using the exact Whitney solve", stacklevel=3)
+        return False
+
+    def _use_multilevel(self) -> bool:
+        """Whether this factorization coarsens the Whitney level; (re)builds the hierarchy if needed."""
+        if not self.coarsen_kh:
+            return False
+        top = self.topology
+        if top.tets is None or top.coords is None:
+            return self._coarsen_off("the Topology has no tets or node coordinates")
+        if self.n_exact:
+            return self._coarsen_off("extra exact rows (PML or metal walls) are present")
+        k_need = self.coarsen_k0 if self.coarsen_k0 is not None else self.k0
+        if k_need is None:
+            return self._coarsen_off("no k0 (pass it to factorize, or set coarsen_k0)")
+        h = self._hier
+        if h is None or h[0] != self.coarsen_kh or k_need > h[1] * (1 + 1e-9):
+            self._build_hierarchy(k_need if self.coarsen_k0 is not None else k_need * WALL_LOOKAHEAD)
+        if not self._hier[2]:
+            return self._coarsen_off("nothing coarsens (the mesh is already at the wavelength limit)")
+        return True
+
+    def _build_hierarchy(self, k_build: float) -> None:
+        from .amge.capped import build_hierarchy
+        top = self.topology
+        if top.tet_index is None:
+            if "no tet_index" not in self._coarsen_warned:
+                self._coarsen_warned.add("no tet_index")
+                warnings.warn("CORVID coarsen_kh: no tet_index in the Topology, assuming vacuum (refractive "
+                              "index 1); the coarsening is too aggressive inside dielectrics", stacklevel=4)
+        index = np.ones(len(top.tets)) if top.tet_index is None else top.tet_index
+        free = np.zeros(len(top.edges), bool)
+        free[top.whitney_edges] = True
+        Ps, Gs, sizes, secs = build_hierarchy(top.coords, top.tets, top.edges, free, k_build * index, self.coarsen_kh)
+        if Ps:
+            # level 0 of the hierarchy is in increasing edge order; the solver's Whitney rows are in
+            # solved order (top.whitney): reorder the rows of P_0 and G_0 to match
+            rank = np.searchsorted(np.flatnonzero(free), top.whitney_edges)
+            Ps[0], Gs[0] = Ps[0][rank].tocsr(), Gs[0][rank].tocsr()
+        # kept as the CSR tuples the Rust kernels take (converted once per hierarchy, not per frequency)
+        self._hier = (self.coarsen_kh, k_build, [_csr_tuple(P, False) for P in Ps], [_csr_tuple(G, False) for G in Gs])
+        self.coarsen_levels, self.coarsen_setup_s = sizes, self.coarsen_setup_s + secs
+
+    def _setup_multilevel(self, k) -> None:
+        """Galerkin operators of the current K and the V-cycle (both in Rust), then its deflation."""
+        top = self.topology
+        self._pc.set_multilevel_galerkin(k, top.whitney, self._hier[2], self._hier[3])
+        K = sp.csr_matrix((k[2], k[1], k[0]), shape=(k[3], k[4]))
+        self.n_deflated = self._deflate(K[top.whitney][:, top.whitney].tocsr())
+
+    def _deflate(self, A) -> int:
+        """Eigenvectors of I - V A (V the V-cycle) with |mu| > DEFLATE_MU: the modes the V-cycle
+        amplifies or barely reduces. Solved exactly around it; returns how many."""
+        import scipy.sparse.linalg as spla
+        n = A.shape[0]
+        op = spla.LinearOperator((n, n), dtype=complex,
+                                 matvec=lambda x: x - self._pc.ml_vcycle(np.ascontiguousarray(A @ x, dtype=complex)))
+        v0 = np.random.default_rng(0).standard_normal(n).astype(complex)
+        k = DEFLATE_K
+        while True:
+            kk = min(k, n - 2)
+            try:
+                mu, Z = spla.eigs(op, k=kk, which="LM", tol=DEFLATE_TOL, maxiter=5000, v0=v0)
+            except spla.ArpackNoConvergence as e:
+                mu, Z = e.eigenvalues, e.eigenvectors
+            sel = np.abs(mu) > DEFLATE_MU
+            if sel.all() and kk < min(DEFLATE_KMAX, n - 2):
+                k *= 2                      # all found modes are bad: there may be more
+                continue
+            break
+        if sel.all() and len(mu):
+            warnings.warn(f"CORVID coarsen_kh: {len(mu)} or more modes need deflation; convergence may suffer "
+                          "(a smaller coarsen_kh coarsens less)", stacklevel=4)
+        Z = Z[:, sel]
+        m = Z.shape[1]
+        if m:
+            Si = np.linalg.inv(Z.T @ (A @ Z))           # plain transpose: keeps the operator complex symmetric
+            self._pc.set_deflation(np.ascontiguousarray(Z.T).ravel(), np.ascontiguousarray(Si).ravel(), m)
+        return m
 
     def _close_to_factor(self) -> bool:
         tol = self.refactor_tol if self._tol_learned is None else min(self.refactor_tol, self._tol_learned)
@@ -302,7 +459,8 @@ class Solver:
         blocks = self._pc.schwarz_bytes
         coarse = self._pc.coarse_factor_nnz * 16
         kcopy = self._k_nnz * 20
-        return dict(blocks=blocks, exact_factor=coarse, k_copy=kcopy, total=blocks + coarse + kcopy,
+        ml = self._pc.ml_bytes
+        return dict(blocks=blocks, exact_factor=coarse, multilevel=ml, k_copy=kcopy, total=blocks + coarse + ml + kcopy,
                     exact_rows=self.n_exact + len(self.topology.whitney), vertex_blocks=self.n_blocks)
 
     def solve(self, b, x0=None) -> np.ndarray:
@@ -333,6 +491,8 @@ class Solver:
                 # this problem tolerates less: keep factors only up to half this distance from now on
                 self._tol_learned = 0.5 * abs(self.k0 ** 2 / self._k0_factor ** 2 - 1)
                 self._pc.refactor(self._k)
+                if self.coarsen_active:
+                    self._setup_multilevel(self._k)
                 self._k0_factor, self.reused, self.refactored = self.k0, False, True
                 xs, its2, res = self._pc.solve_columns(cols, list(xs), self.method, self.rtol, self.restart, self.maxiter)
                 its = [a + b for a, b in zip(its, its2)]
@@ -381,6 +541,14 @@ class Solver:
         for i in range(m):
             X0 += V[i][:, None] * G[i][None, :]
         return X0
+
+
+def _csr_tuple(M, complex_values: bool):
+    """(indptr, indices, data, nrows, ncols) as the Rust kernels take a CSR matrix."""
+    M = sp.csr_matrix(M)
+    M.sort_indices()
+    return (M.indptr.astype(np.int32), M.indices.astype(np.int32),
+            np.ascontiguousarray(M.data, dtype=np.complex128 if complex_values else np.float64), M.shape[0], M.shape[1])
 
 
 def _same_pattern(ip1, ix1, ip2, ix2) -> bool:

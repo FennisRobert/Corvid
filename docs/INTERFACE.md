@@ -19,9 +19,13 @@ No coordinates, tets, materials, gradient matrices or boundary information.
 For model2 that's about 1 MB of mesh data for an 88,528-unknown system. Index arrays can be int32 or int64, and
 shape (2, E) or (E, 2).
 
-**Layout assumption** (`Topology.nedelec2`): global DOFs come in four blocks of second-order Nédélec,
-`[edge DOF 1 | edge DOF 2 | face DOF 1 | face DOF 2]`. Each block is in `mesh.edges` / `mesh.tris` order, and the first
-block is the lowest-order (Whitney) edge DOF. That's the order `compute_global_dofcodes()` reports (64, 66, 128, 129).
+**Layout assumption** (`Topology.nedelec2`): global DOFs come in `edge_dofs` blocks of edge DOFs followed by
+`face_dofs` blocks of face DOFs, `[edge DOF 1 | edge DOF 2 | ... | face DOF 1 | ...]`, with `edge_dofs` and `face_dofs`
+EMerge's `dofset.set3d.n_edge_dofs` / `n_face_dofs` (defaults 2 and 2: the second-order mixed spaces). Each block is in
+`mesh.edges` / `mesh.tris` order, and the first block is the lowest-order (Whitney) edge DOF, which is edge DoF 0 in
+every EMerge `ElementSpace`. For second-order mixed (Volakis) that's the order `compute_global_dofcodes()` reports
+(64, 66, 128, 129). Only the Whitney block is special: the coarse level is the injection onto it, which is the exact
+Galerkin coarse space because every EMerge basis is hierarchical over Whitney.
 The ML export's discrete gradient confirms the first block is Whitney: its rows there are exactly −1/+1 from
 `edges[0]` to `edges[1]`.
 
@@ -74,6 +78,27 @@ EMerge matrices) are ignored by the PML detection, and fewer than 2 % complex-do
 **Mesh density.** The exact coarse level is first order, so it needs roughly 5 or more edges per wavelength. At
 about 3 per wavelength, iterations climb from ~13 to ~200. Use `method="gmres"`, or `"cocg"` when A is complex symmetric (every non-periodic EMerge system is).
 COCG stores no Krylov basis and needs 0–2 more iterations.
+
+**Coarsened Whitney level (experimental, opt-in).** `Solver(..., coarsen_kh=0.6)` replaces the exact factorization
+of the Whitney rows with a V-cycle over an agglomerated hierarchy that only coarsens where the mesh is finer than the
+wave needs: every aggregate keeps k_loc·H ≤ `coarsen_kh` (H its bounding-box diagonal, k_loc = k0 × the largest
+refractive index in it). The few modes that V-cycle amplifies (near-resonant modes the coarse levels misplace; 2–5 on
+model5) are found by an eigensolve and solved exactly around it. `coarsen_kh=0` (the default) is the solver as before.
+It is meant for meshes refined far below the wavelength (PCB traces), where the exact Whitney factor grows fastest.
+It needs the tets on the same vertex numbering as `edges`, and their refractive index sqrt(εr·μr):
+
+```python
+top = corvid.Topology.nedelec2(mesh.edges, mesh.tris, solve_ids, nodes=mesh.nodes,
+                               tets=mesh.tets, tet_index=np.sqrt(er_per_tet * ur_per_tet))
+sol = corvid.Solver(top, method="cocg", coarsen_kh=0.6, coarsen_k0=k0_top_of_sweep)
+```
+
+It falls back to the exact solve (with a warning) when PML or metal-wall rows are solved exactly, or when nothing
+coarsens. `sol.coarsen_levels`, `sol.n_deflated`, `sol.coarsen_setup_s` and `sol.memory_report["multilevel"]` report
+what it did. The hierarchy is built once per sweep, in Rust (`corvid._kernels.amge_hierarchy`: 1.2 s at 80k tets, 6 s
+at 400k; the Python reference in `corvid/amge/capped.py` took 60 s and 14 minutes). On model5 (1.75M unknowns,
+6.2 GHz): 14 iterations against 9 with the exact solve, 650 MB for the whole multilevel solve against a 706 MB exact
+factor; the level operators, not the coarsest factor, are now most of that.
 
 ## 3. Proposed wiring
 
@@ -144,7 +169,8 @@ class SolverCorvid(Solver):
   describes the rows. That's not supported in version 1.
 - **No convergence** (`exit_code == 1`). Re-solve with the direct solver and log a warning. It hasn't happened on
   any test problem, but it's the safe default while CORVID is new.
-- **Any other element order** than second-order Nédélec.
+- **First-order mixed** (`[0], []`): every unknown is Whitney, so CORVID degenerates to one direct solve plus
+  overhead. Use the direct solver.
 
 ### 3d. Thin conductors (split DoFs) are supported
 

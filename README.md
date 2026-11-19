@@ -83,8 +83,9 @@ for K, b, k0 in sweep:            # K: the solved system (CSR or CSC), b: (n,) o
     print(sol.info)               # iterations and true relative residual per port
 ```
 
-- **Layout.** `Topology.nedelec2` takes EMerge's second-order layout `[edge | edge | face | face]`. For any
-  other layout, `corvid.Topology(dof_entity, dof_kind, edges, tris)` takes the mesh entity and kind of each
+- **Layout.** `Topology.nedelec2` takes EMerge's layout: `edge_dofs` edge blocks, then `face_dofs` face blocks
+  (default 2 and 2, the second-order mixed spaces), the first edge block being Whitney. That covers every EMerge
+  `ElementSpace`. For any other layout, `corvid.Topology(dof_entity, dof_kind, edges, tris)` takes the mesh entity and kind of each
   unknown.
 - **Threads.** `threads=n` sets the count per solver. `corvid.set_num_threads(n)` sets the default for
   solvers that don't set one.

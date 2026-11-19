@@ -366,6 +366,93 @@ impl Corvid {
         }
         x
     }
+
+    /// Bytes held: every level's operators, transfers and gradients, plus the coarsest factor.
+    pub fn memory_bytes(&self) -> usize {
+        let c = |m: &Csr<C>| m.nnz() * 20 + (m.nrows + 1) * 4;
+        let r = |m: &Csr<f64>| m.nnz() * 12 + (m.nrows + 1) * 4;
+        let lv: usize = self.levels.iter().map(|l| c(&l.a) + c(&l.ag) + r(&l.p) + r(&l.pt) + r(&l.g) + r(&l.gt)).sum();
+        lv + self.coarsest.factor_nnz * 16
+    }
+
+    pub fn coarsest_factor_nnz(&self) -> usize {
+        self.coarsest.factor_nnz
+    }
+}
+
+/// The opt-in coarse solve of `TwoLevel` (Solver(coarsen_kh > 0)): one V-cycle over a wavelength-capped
+/// agglomerated hierarchy of the Whitney rows, with the few modes that cycle amplifies (near-resonant
+/// modes the coarse levels misplace) solved exactly before and after it:
+///
+///   y = Zc r,  y += V (r - A y),  y += Zc (r - A y),   Zc = Z (Z^T A Z)^{-1} Z^T
+///
+/// Z^T is the plain transpose, so for complex symmetric A the operator stays symmetric (COCG applies).
+pub struct Deflated {
+    vc: Corvid,
+    /// deflation basis, column after column (m columns of length n)
+    z: Vec<C>,
+    /// (Z^T A Z)^{-1}, row-major m x m
+    si: Vec<C>,
+    m: usize,
+}
+
+impl Deflated {
+    pub fn new(vc: Corvid) -> Result<Self, String> {
+        if vc.levels.is_empty() {
+            return Err("the multilevel coarse solve needs at least one coarsened level".into());
+        }
+        Ok(Deflated { vc, z: Vec::new(), si: Vec::new(), m: 0 })
+    }
+
+    fn n(&self) -> usize {
+        self.vc.levels[0].a.nrows
+    }
+
+    pub fn set_deflation(&mut self, z: Vec<C>, si: Vec<C>, m: usize) -> Result<(), String> {
+        if z.len() != m * self.n() || si.len() != m * m {
+            return Err(format!("deflation: Z must be {} x {m} and the inverse {m} x {m}", self.n()));
+        }
+        self.z = z;
+        self.si = si;
+        self.m = m;
+        Ok(())
+    }
+
+    pub fn memory_bytes(&self) -> usize {
+        self.vc.memory_bytes() + (self.z.len() + self.si.len()) * 16
+    }
+
+    pub fn coarsest_factor_nnz(&self) -> usize {
+        self.vc.coarsest_factor_nnz()
+    }
+
+    /// Z (Z^T A Z)^{-1} Z^T r
+    fn zc(&self, r: &[C]) -> Vec<C> {
+        let (n, m) = (r.len(), self.m);
+        let zt: Vec<C> = (0..m).into_par_iter().map(|j| self.z[j * n..(j + 1) * n].iter().zip(r).map(|(a, b)| a * b).sum()).collect();
+        let s: Vec<C> = (0..m).map(|i| (0..m).map(|j| self.si[i * m + j] * zt[j]).sum()).collect();
+        let mut y = vec![C::default(); n];
+        map_mut(&mut y, |i, yi| *yi = (0..m).map(|j| self.z[j * n + i] * s[j]).sum());
+        y
+    }
+
+    /// The V-cycle alone (what the deflation basis is computed from).
+    pub fn vcycle(&self, r: &[C]) -> Vec<C> {
+        self.vc.apply(r)
+    }
+
+    pub fn apply(&self, r: &[C]) -> Vec<C> {
+        if self.m == 0 {
+            return self.vc.apply(r);
+        }
+        let a = &self.vc.levels[0].a;
+        let mut y = self.zc(r);
+        let v = self.vc.apply(&a.residual(r, &y));
+        add(&mut y, &v);
+        let d = self.zc(&a.residual(r, &y));
+        add(&mut y, &d);
+        y
+    }
 }
 
 /// What the Krylov solvers need from a preconditioner.
@@ -398,9 +485,12 @@ pub struct TwoLevel {
     /// last power-iteration vector, the warm start of the next estimate
     lvec: Vec<C>,
     inj: Vec<usize>,
-    coarse: Direct,
+    /// the exact coarse solve (None when the multilevel coarse solve replaces it)
+    coarse: Option<Direct>,
     /// positions in K's value array of the coarse factor's entries, in SPARTA's order
     coarse_pos: Vec<usize>,
+    /// opt-in multilevel coarse solve on the `inj` rows (set by the caller after `new` / `refactor`)
+    pub ml: Option<Deflated>,
     pub schwarz_bytes: usize,
     pub dense_fallbacks: usize,
     pub coarse_factor_nnz: usize,
@@ -421,10 +511,15 @@ const LMAX_REFACTOR_MAXIT: usize = 20;
 
 impl TwoLevel {
     /// `k_values`: K's values in CSR order (the pattern is the one `k` was built from).
-    pub fn new(k: Split, k_values: &[C], patches: Vec<Vec<u32>>, inj: Vec<usize>, order: usize, sparse: bool) -> Result<Self, String> {
-        let (colptr, rows, coarse_pos) = k.lower_csc_positions(&inj);
-        let vals: Vec<C> = coarse_pos.par_iter().map(|&p| k_values[p]).collect();
-        let coarse = Direct::from_csc(inj.len(), &colptr, &rows, &vals)?;
+    /// `exact_coarse`: factorize the `inj` rows exactly (false: the caller sets `ml` instead).
+    pub fn new(k: Split, k_values: &[C], patches: Vec<Vec<u32>>, inj: Vec<usize>, order: usize, sparse: bool, exact_coarse: bool) -> Result<Self, String> {
+        let (coarse, coarse_pos) = if exact_coarse {
+            let (colptr, rows, coarse_pos) = k.lower_csc_positions(&inj);
+            let vals: Vec<C> = coarse_pos.par_iter().map(|&p| k_values[p]).collect();
+            (Some(Direct::from_csc(inj.len(), &colptr, &rows, &vals)?), coarse_pos)
+        } else {
+            (None, Vec::new())
+        };
         let t = Instant::now();
         let schwarz = Schwarz::with_storage(&k, patches, sparse)?;
         tick(&T_B_BLOCKS, t);
@@ -432,7 +527,8 @@ impl TwoLevel {
         let mut tl = TwoLevel {
             schwarz_bytes: schwarz.memory_bytes(),
             dense_fallbacks: schwarz.dense_fallbacks(),
-            coarse_factor_nnz: coarse.factor_nnz,
+            coarse_factor_nnz: coarse.as_ref().map_or(0, |c| c.factor_nnz),
+            ml: None,
             k,
             schwarz,
             order,
@@ -449,8 +545,10 @@ impl TwoLevel {
 
     /// New values of K on the same pattern.
     pub fn refactor(&mut self, k: Split, k_values: &[C]) -> Result<(), String> {
-        let vals: Vec<C> = self.coarse_pos.par_iter().map(|&p| k_values[p]).collect();
-        self.coarse.refactor(&vals)?;
+        if let Some(coarse) = &self.coarse {
+            let vals: Vec<C> = self.coarse_pos.par_iter().map(|&p| k_values[p]).collect();
+            coarse.refactor(&vals)?;
+        }
         let t = Instant::now();
         self.schwarz.refactor(&k)?;
         tick(&T_B_BLOCKS, t);
@@ -549,7 +647,17 @@ impl TwoLevel {
             col.iter_mut().zip(&self.inj).for_each(|(v, &i)| *v = r[i * K + c]);
         });
         let tc = Instant::now();
-        let ec = self.coarse.solve_many(&rc, K);
+        let ec = match (&self.coarse, &self.ml) {
+            (Some(coarse), _) => coarse.solve_many(&rc, K),
+            (None, Some(ml)) => {
+                let mut ec = Vec::with_capacity(nc * K);
+                for c in 0..K {
+                    ec.extend(ml.apply(&rc[c * nc..(c + 1) * nc]));
+                }
+                ec
+            }
+            (None, None) => vec![C::default(); nc * K],
+        };
         tick(&T_COARSEST, tc);
         for (q, &i) in self.inj.iter().enumerate() {
             for c in 0..K {

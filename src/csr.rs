@@ -597,3 +597,95 @@ impl CMat for Split {
         }
     }
 }
+
+/// C = A B, row-parallel with a per-thread dense accumulator (each output row sorted). Used for the
+/// Galerkin operators of the opt-in multilevel coarse solve.
+pub fn spgemm<X, Y, Z>(a: &Csr<X>, b: &Csr<Y>) -> Csr<Z>
+where
+    X: Copy + Send + Sync + Mul<Y, Output = Z>,
+    Y: Copy + Send + Sync,
+    Z: Copy + Send + Sync + Default + AddAssign,
+{
+    assert_eq!(a.ncols, b.nrows, "spgemm: inner dimensions differ");
+    let rows: Vec<(Vec<u32>, Vec<Z>)> = (0..a.nrows)
+        .into_par_iter()
+        .map_init(
+            || (vec![Z::default(); b.ncols], vec![false; b.ncols], Vec::<u32>::new()),
+            |(acc, used, cols), i| {
+                for p in a.ip[i]..a.ip[i + 1] {
+                    let (k, x) = (a.ix[p] as usize, a.a[p]);
+                    for q in b.ip[k]..b.ip[k + 1] {
+                        let j = b.ix[q] as usize;
+                        if !used[j] {
+                            used[j] = true;
+                            cols.push(j as u32);
+                        }
+                        acc[j] += x * b.a[q];
+                    }
+                }
+                cols.sort_unstable();
+                let vals: Vec<Z> = cols.iter().map(|&j| std::mem::take(&mut acc[j as usize])).collect();
+                cols.iter().for_each(|&j| used[j as usize] = false);
+                (std::mem::take(cols), vals)
+            },
+        )
+        .collect();
+    let mut ip = Vec::with_capacity(a.nrows + 1);
+    ip.push(0);
+    let nnz: usize = rows.iter().map(|r| r.0.len()).sum();
+    let (mut ix, mut av) = (Vec::with_capacity(nnz), Vec::with_capacity(nnz));
+    for (c, v) in rows {
+        ix.extend(c);
+        av.extend(v);
+        ip.push(ix.len());
+    }
+    Csr { nrows: a.nrows, ncols: b.ncols, ip, ix, a: av }
+}
+
+/// A^T (rows of the result sorted).
+pub fn transpose<T: Copy + Default>(m: &Csr<T>) -> Csr<T> {
+    let mut ip = vec![0usize; m.ncols + 1];
+    for &j in &m.ix {
+        ip[j as usize + 1] += 1;
+    }
+    for j in 0..m.ncols {
+        ip[j + 1] += ip[j];
+    }
+    let mut next = ip.clone();
+    let mut ix = vec![0u32; m.ix.len()];
+    let mut a = vec![T::default(); m.ix.len()];
+    for i in 0..m.nrows {
+        for p in m.ip[i]..m.ip[i + 1] {
+            let j = m.ix[p] as usize;
+            ix[next[j]] = i as u32;
+            a[next[j]] = m.a[p];
+            next[j] += 1;
+        }
+    }
+    Csr { nrows: m.ncols, ncols: m.nrows, ip, ix, a }
+}
+
+/// The rows and columns `sel` of a square matrix, in `sel` order (columns of each row sorted).
+pub fn submatrix<T: Copy + Send + Sync>(m: &Csr<T>, sel: &[usize]) -> Csr<T> {
+    let mut pos = vec![u32::MAX; m.ncols];
+    for (q, &i) in sel.iter().enumerate() {
+        pos[i] = q as u32;
+    }
+    let rows: Vec<(Vec<u32>, Vec<T>)> = sel
+        .par_iter()
+        .map(|&i| {
+            let mut r: Vec<(u32, T)> = (m.ip[i]..m.ip[i + 1]).filter(|&p| pos[m.ix[p] as usize] != u32::MAX).map(|p| (pos[m.ix[p] as usize], m.a[p])).collect();
+            r.sort_unstable_by_key(|x| x.0);
+            r.into_iter().unzip()
+        })
+        .collect();
+    let mut ip = Vec::with_capacity(sel.len() + 1);
+    ip.push(0);
+    let (mut ix, mut a) = (Vec::new(), Vec::new());
+    for (c, v) in rows {
+        ix.extend(c);
+        a.extend(v);
+        ip.push(ix.len());
+    }
+    Csr { nrows: sel.len(), ncols: sel.len(), ip, ix, a }
+}
